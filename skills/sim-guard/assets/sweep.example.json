@@ -1,0 +1,31 @@
+{
+  "name": "k_scan",
+  "line": "demo",
+  "solver": "comsol",
+  "template": "template",
+  "mode": "grid",
+  "params": {
+    "k": [1, 2, 4]
+  },
+  "max_cases": 200,
+  "max_retry": 1,
+  "stages": [
+    {
+      "name": "build",
+      "script": "build.py",
+      "cores": 2,
+      "mem_gb": 4,
+      "max_h": 0.5,
+      "outputs": ["prepared.mph"]
+    },
+    {
+      "name": "solve",
+      "script": "solve.py",
+      "guarded": true,
+      "cores": 8,
+      "mem_gb": 16,
+      "est_h": 1,
+      "outputs": ["solved.mph", "result.json"]
+    }
+  ]
+}

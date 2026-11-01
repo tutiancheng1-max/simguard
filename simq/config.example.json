@@ -1,0 +1,21 @@
+{
+  "cores": 14,
+  "mem_gb": 24,
+  "min_free_mem_gb": 4,
+  "licenses": {
+    "comsol": 1,
+    "lumerical": 1,
+    "fluent": 1,
+    "matlab": 1
+  },
+  "line_priority": {},
+  "poll_s": 10,
+  "reserve_after_h": 2,
+  "shutdown_vote": null,
+  "require_preflight": true,
+  "smoke_max_h": 0.5,
+  "allow_prio_override": false,
+  "stall_min": 20,
+  "mem_guard": true,
+  "error_markers": ["/*****Error"]
+}

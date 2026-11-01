@@ -1,0 +1,23 @@
+{
+  "run_id": "TODO",
+  "line": "TODO",
+  "solver": "TODO comsol | lumerical | fluent | matlab | python | other",
+  "derived_from": [],
+  "drivers": [],
+  "outputs": [],
+  "readback": {
+    "not_applicable": "TODO 改成 comsol_tensor_models，或 dump 加 checks；COMSOL、Lumerical、Fluent 不能跳过，纯脚本求解才可保留并写原因"
+  },
+  "switch_tests": [],
+  "literature": [],
+  "resources": {
+    "cores": 0,
+    "mem_gb": 0,
+    "basis": "TODO 峰值内存怎么估的"
+  },
+  "resume": {
+    "supported": false,
+    "why_not": "TODO 不能续跑的原因；能续跑时改为 supported=true 并写 how"
+  },
+  "jobs": []
+}

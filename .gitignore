@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+
+# 本机队列数据
+simq/config.json
+simq/jobs/
+simq/dispatcher.json
+simq/dispatcher.lock
+simq/dispatcher.log
+simq/DISPATCHER_STOP
+*.bak*
+
+# 模型和结果不进 repo
+*.mph
+*.fsp
+*.cas
+*.cas.h5
+*.dat.h5
+*.mat
+.simguard/

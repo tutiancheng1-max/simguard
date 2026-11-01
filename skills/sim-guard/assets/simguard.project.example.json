@@ -1,0 +1,19 @@
+{
+  "simq_py": "simq/simq.py",
+  "readonly_paths": ["runs_archive"],
+  "approved_templates": ["templates"],
+  "do_not_reuse_markers": ["DO_NOT_REUSE*"],
+  "forbidden_patterns": [
+    {
+      "id": "example-rule",
+      "glob": "*.java",
+      "regex": "oldHelperWithKnownBug\\(",
+      "why": "说明为什么不能这样写，以及应该怎么写"
+    }
+  ],
+  "comsol_tensor": {
+    "physics_tags": ["tte", "ttl"],
+    "fields": ["T", "Te", "Tl"]
+  },
+  "required_report_checks": ["energy_balance"]
+}

@@ -1,0 +1,12 @@
+{
+  "question": "TODO 这次运行要回答的一个问题",
+  "criteria": [
+    {"id": "G1", "metric": "TODO 指标名", "op": ">=", "threshold": 0, "unit": "TODO"}
+  ],
+  "validation": {
+    "kind": "TODO analytic_limit | conservation | independent_method | literature_reproduction | experiment",
+    "description": "TODO 怎么校验，用什么基准",
+    "shares_code_with_model": true
+  },
+  "on_fail": "TODO 不通过时怎么办"
+}
