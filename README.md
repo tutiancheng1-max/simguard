@@ -1,8 +1,21 @@
 # simguard
 
+[![tests](https://github.com/tutiancheng1-max/simguard/actions/workflows/tests.yml/badge.svg)](https://github.com/tutiancheng1-max/simguard/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)
+![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+
 English | [简体中文](README.zh-CN.md)
 
-Helps AI agents running long scientific simulations avoid errors where the solver runs and returns numbers, but the model was set up wrong.
+**Catch the simulation that runs fine but was set up wrong, before an AI agent spends hours on it.**
+
+An agent driving COMSOL set a thermal conductivity tensor as `diag(k, 1, 1)`: it wrote the one component it meant to and left the other two at the default `1 W/(m·K)`. The solve converged, the numbers looked plausible, and the thermal results of two papers became suspect before anyone noticed. Nothing in the log was wrong; only the saved model was.
+
+simguard reads the saved model back before the job is submitted and stops it:
+
+![sg.py readback blocking a partially set tensor](docs/readback-demo.svg)
+
+*The message reads: "part of the tensor diagonal is the default 1 and part is not: usually only one component was set." Exit code 1, so `submit` refuses the run.*
 
 `simguard` has two parts:
 

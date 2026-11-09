@@ -1,6 +1,21 @@
 # simguard
 
+[![tests](https://github.com/tutiancheng1-max/simguard/actions/workflows/tests.yml/badge.svg)](https://github.com/tutiancheng1-max/simguard/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)
+![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+
 [English](README.md) | 简体中文
+
+**在 AI agent 花几个小时算一个“能跑、但设错了”的仿真之前，把它拦下来。**
+
+一个控制 COMSOL 的 agent 把热导率张量设成了 `diag(k, 1, 1)`：它只写了想写的那个分量，另外两个留在默认值 `1 W/(m·K)`。求解收敛了，数字看着也合理，等发现时两篇论文的热学结果都已经存疑。日志里没有任何错误，错的只是保存下来的模型。
+
+simguard 在提交前读回保存的模型，直接拦下：
+
+![sg.py readback 拦下只设了一部分的张量](docs/readback-demo.svg)
+
+*退出码为 1，`submit` 拒绝提交这次运行。*
 
 让 AI agent 跑长时间科学仿真时，少犯那些“算得出结果、但模型其实设错了”的错误。
 
