@@ -1,109 +1,124 @@
 # simguard
 
-让 AI agent 跑长时间科学仿真时，少犯那些“算得出结果、但模型其实设错了”的错误。
+English | [简体中文](README.zh-CN.md)
 
-`simguard` 由两部分组成：
+Helps AI agents running long scientific simulations avoid errors where the solver runs and returns numbers, but the model was set up wrong.
 
-- **`simq`**：单机仿真队列。多个对话和子 agent 共用一台机器时，按核数、内存和 license 排队，求解进程不依赖提交它的 agent。
-- **`sim-guard` skill**：给 Claude Code 用的流程和检查脚本。它限定 agent 的工作范围，在提交前读回已保存的模型，冻结判据，并要求报告写明没做的检查。
+`simguard` has two parts:
 
-**English summary:** a single-machine solver queue plus a Claude Code skill that makes agents read back saved models, freeze pass/fail criteria before running, use independent validation, and report what was not checked. The docs are in Chinese.
+- **`simq`**: a single-machine solver queue. When several conversations and subagents share one machine, it schedules jobs by cores, memory and licenses, and solver processes keep running even if the agent that submitted them exits.
+- **`sim-guard` skill**: a workflow and check scripts for Claude Code. It limits where the agent may work, reads back the saved model before submission, freezes pass/fail criteria, and requires the report to state which checks were not done.
 
-## 它解决什么问题
+The detailed docs inside the skill (under `skills/sim-guard/`) are currently in Chinese only.
 
-| 问题 | 机制 |
-|---|---|
-| 张量只设了一个分量，模型照常能算 | 不开求解器，直接读回 `.mph` 并核对 |
-| 校准通过，但基准和模型带同一个错误 | 判据里不接受“和旧结果一致”作为校验 |
-| 新脚本从有 bug 的旧脚本复制而来 | 搜索已知错误写法，拒绝带不可复用标记的来源 |
-| 看到结果后调整通过标准 | 判据先冻结并记录哈希，修改留下历史 |
-| 参数名写着关闭，效果却没关 | 开关测试不通过就不能提交 |
-| 报告写通过，但网格收敛没做 | 必查项没做时，不接受 `Overall: PASS` |
-| 子 agent 越界、插队或绕过排队 | 工作范围清单、任务模板、队列端回执检查 |
-| 求解器出错，退出码却是 0 | 查日志标记和产物，不把它记成成功 |
-| 扫描的所有算例其实用了同一个参数 | 每个算例读回自己的参数 |
-| 分不清任务是慢还是卡死 | 监控进程树的 CPU、内存和日志 |
+## What it solves
 
-## 依赖
+The most expensive simulation errors are the ones where the model runs, the result looks reasonable, and it is still wrong. These errors fall into four general classes, each with its own checks. The full taxonomy is in [failure-modes.md](skills/sim-guard/references/failure-modes.md).
 
-- Windows（`simq` 使用 Windows 的进程和内存接口；`sg.py` 跨平台，但目前只在 Windows 上测过）
-- Python 3.9 以上，无第三方依赖
-- [Claude Code](https://claude.com/claude-code)，用于加载 skill
-- 你自己的求解器和 license，本 repo 不包含任何求解器
+| Class | General form | Examples | Mechanism |
+|---|---|---|---|
+| A Setup | The saved model differs from what you think it is | Only one tensor component set; sweep parameter never written into the model; a switch that does not do what its name says | Read back the saved file and check it against declared expectations (`.mph` parsed directly, other solvers export JSON); built-in check for partially set tensors; response tests judge numerically whether an input actually has an effect |
+| B Execution | The result was not produced by this run | Error but exit code 0; NaN in results; driver edited after submission | Log error markers, output freshness and finite-value checks; preflight receipt covers scripts, drivers, criteria and model |
+| C Validation | The check cannot fail | Benchmark shares the model's bug; all mesh levels give identical results; conservation not closed | Validation must be independent of model code; `converged` and `sum_approx` result expectations |
+| D Process | The workflow was bypassed | Thresholds changed after seeing results; copying from an old buggy script; bypassing the queue | Criteria frozen, hash checked at submit, report and collect; `DO_NOT_REUSE` markers and `sg.py taint` trace downstream runs; work-scope and queue receipts |
 
-## 安装
+When a new error shows up, classify it using the steps at the top of failure-modes.md, then add a check that catches it automatically. That way the same class of error does not happen twice.
 
-**1. 配置队列**
+## Requirements
+
+- Windows (`simq` uses Windows process and memory APIs; `sg.py` is cross-platform but has only been tested on Windows)
+- Python 3.9+, no third-party dependencies
+- [Claude Code](https://claude.com/claude-code), to load the skill
+- Your own solvers and licenses; this repo contains no solver
+
+## Install
+
+**1. Configure the queue**
 
 ```powershell
 Copy-Item simq\config.example.json simq\config.json
 ```
 
-把 `simq\config.json` 里的核数、内存和 license 数改成你的机器。`require_preflight` 设为 `true` 时，正式任务必须先通过检查。
+Set the cores, memory and license counts in `simq\config.json` to match your machine. With `require_preflight` set to `true`, production jobs must pass the checks first.
 
-**2. 安装 skill**
+**2. Install the skill**
 
 ```powershell
 Copy-Item -Recurse skills\sim-guard $HOME\.claude\skills\sim-guard
 ```
 
-**3. 告诉 skill 队列在哪里**
+**3. Tell the skill where the queue is**
 
-设置环境变量 `SIMQ_PY` 为 `simq.py` 的绝对路径；或者在项目根目录放一个 `simguard.project.json`，写上 `simq_py`。
+Set the environment variable `SIMQ_PY` to the absolute path of `simq.py`, or put a `simguard.project.json` with `simq_py` in the project root.
 
-**4. 配置项目规则（可选）**
+**4. Configure project rules (optional)**
 
-参考 [simguard.project.example.json](skills/sim-guard/assets/simguard.project.example.json)：
+See [simguard.project.example.json](skills/sim-guard/assets/simguard.project.example.json):
 
-| 字段 | 作用 |
+| Field | Purpose |
 |---|---|
-| `simq_py` | `simq.py` 的路径，相对于配置文件 |
-| `readonly_paths` | run 目录不能放在这些路径下 |
-| `approved_templates` | 设置后，`derived_from` 只能来自这些路径 |
-| `do_not_reuse_markers` | 目录里有这些文件名时，不能复用其中的脚本 |
-| `forbidden_patterns` | 项目已知的错误写法 |
-| `comsol_tensor` | 要检查哪些物理场的张量 |
-| `required_report_checks` | 报告必须多回答哪些检查 |
+| `simq_py` | Path to `simq.py`, relative to the config file |
+| `readonly_paths` | Run directories may not be placed under these paths |
+| `approved_templates` | When set, `derived_from` may only point inside these paths |
+| `do_not_reuse_markers` | Scripts in a directory containing these filenames may not be reused |
+| `forbidden_patterns` | Known-bad code patterns for this project |
+| `readback_expect` | Readback expectations applied to every run in the project |
+| `builtin_readback` | Set to `false` to turn off the built-in tensor check |
+| `required_report_checks` | Extra checks the report must answer |
 
-**5. 把规则写进项目的 CLAUDE.md（推荐）**
+**5. Add the rule to the project's CLAUDE.md (recommended)**
 
 ```markdown
-长时间求解一律走 sim-guard 流程和 simq 队列，不要直接启动求解器。
-派子 agent 时，把 sim-guard 的 references/agent-brief.md 填好放进 prompt。
+All long solves go through the sim-guard workflow and the simq queue; never start a solver directly.
+When dispatching a subagent, fill in sim-guard's references/agent-brief.md and include it in the prompt.
 ```
 
-## 用法
+## Usage
 
-在 Claude Code 里提出仿真任务，skill 会自动触发。agent 走的流程如下：
+Ask for a simulation task in Claude Code and the skill triggers automatically. The agent follows this flow:
 
 ```powershell
 python sg.py init runs\case1
-# 填写 gate.json 和 manifest.json
+# fill in gate.json and manifest.json
 python sg.py freeze runs\case1
 python sg.py submit runs\case1 --script run.ps1 --sw comsol --est 3
-# 求解完成，填写 REPORT.md
+# after the solve finishes, fill in REPORT.md
 python sg.py report runs\case1
 ```
 
-你也可以手动检查已有的文件：
+You can also check existing files by hand:
 
 ```powershell
-python sg.py readback model.mph
+python sg.py readback model.mph            # built-in tensor check
+python sg.py readback model.mph --list     # list all parameters, physics and material settings in the model
 python sg.py scan path\to\drivers
+python sg.py taint runs\old_run --reason "only one tensor component set"   # find every run derived from it
 ```
 
-## 端到端测试
+A readback expectation in `manifest.json` looks like this (run `sg.py readback <file> --list` to see the available keys):
 
-[examples/e2e.py](examples/e2e.py) 用真实求解器跑很短的算例：正确版本要走通，故意设错的版本要被拦下。它会占用 license，请在机器空闲时通过队列运行：
+```json
+"readback": {
+  "sources": {"model": "out/model.mph"},
+  "expect": [
+    {"select": "model:param/L", "op": "approx", "value": 3e-6, "rel": 1e-9},
+    {"select": "model:physics/*/*/c", "op": "isotropic"}
+  ]
+}
+```
+
+## End-to-end tests
+
+[examples/e2e.py](examples/e2e.py) runs very short cases on real solvers: the correct version must pass and a deliberately broken version must be blocked. It uses licenses, so run it through the queue while the machine is idle:
 
 ```powershell
 python examples\e2e.py comsol --workdir D:\e2e\comsol --simq C:\path\simq.py
 python examples\e2e.py lumerical --workdir D:\e2e\lumerical --simq C:\path\simq.py
 ```
 
-## 参数扫描
+## Parameter sweeps
 
-多个算例或多个阶段时用 `sweep.py`，说明见 [references/sweep.md](skills/sim-guard/references/sweep.md)：
+For multiple cases or multiple stages, use `sweep.py`; see [references/sweep.md](skills/sim-guard/references/sweep.md):
 
 ```powershell
 python sweep.py plan sweep.json
@@ -111,29 +126,30 @@ python sweep.py advance sweep.json --wait 540
 python sweep.py collect sweep.json
 ```
 
-重复运行不会重复提交。每个算例都会读回自己的参数；license 问题和丢失的任务按上限重试，其他失败会停下，不影响别的算例。
+Re-running does not resubmit. Each case reads back its own parameters; license problems and lost jobs are retried up to a limit, while other failures stop that case without affecting the rest.
 
-## 能力边界
+## Limits
 
-这些检查能减少错误，但不能证明模型正确。
+These checks reduce errors; they do not prove the model is correct.
 
-- 张量读回只自动覆盖 COMSOL 系数型 PDE 的 `c`。其他设置和其他求解器，要由 agent 导出 JSON 并配置核对项。
-- `manifest`、`gate` 和报告里的内容由 agent 填写。开关测试是否真的做过、`shares_code_with_model` 是否属实、报告证据是否可靠，脚本只能看到记录，需要人或另一个 agent 复核。
-- `switch_tests` 和 `literature` 留空时，脚本视为没有相关项。
-- 回执是普通文件，这些检查防的是疏忽和偷懒，不防故意伪造。
-- 判据冻结只防止运行后被修改，不能保证判据本身合理。
-- 除非加 hook，否则 agent 仍有可能直接启动求解器。
-- 失败分类只看日志文字，可能分错。`STALLED` 也只是提示，不代表任务一定卡死。
-- `sweep.py advance` 要有人或 agent 反复运行才会推进下一阶段，它不是常驻服务。
+- `.mph` global parameters, physics settings and material properties are parsed directly. Lumerical, Fluent and other solvers have no built-in parser; the agent has to export JSON and configure expectations for it.
+- The built-in `no_partial_default` is a heuristic: a genuinely anisotropic tensor with a component that happens to equal 1 will be flagged, and must be listed in `readback.allow` with a reason.
+- `manifest`, `gate` and the report are filled in by the agent. Whether `shares_code_with_model` is true and whether report evidence is reliable can only be seen as records by the scripts; a human or another agent needs to review them. Response-test numbers can be read from result files, but which file belongs to which run is still written by the agent.
+- Empty `response_tests`, `switch_tests` and `literature` are treated as "nothing applies".
+- Receipts are plain files. These checks guard against oversight and shortcuts, not deliberate forgery.
+- Freezing criteria only prevents changing them after the run; it does not make the criteria themselves sound.
+- Without a hook, an agent can still start a solver directly.
+- Failure classification only looks at log text and can be wrong. `STALLED` is a hint, not proof that a job is stuck.
+- `sweep.py advance` only moves to the next stage when a person or agent runs it again; it is not a resident service.
 
-## 测试
+## Tests
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-测试会用临时目录启动一个独立的调度器，不碰已有队列，也不调用任何求解器。`autostart` 只测试 `print`，不会真的创建计划任务。
+The tests start an isolated dispatcher in a temp directory, leave any existing queue alone, and call no solver. `autostart` is only tested with `print`; no scheduled task is created.
 
-## 许可证
+## License
 
 [MIT](LICENSE)

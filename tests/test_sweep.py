@@ -39,6 +39,8 @@ if mode == "marker":
     print("/*****Error"); sys.exit(0)
 if mode == "false_done":
     sys.exit(0)
+if mode == "nan":
+    json.dump({"value": float("nan")}, open("result.json", "w")); sys.exit(0)
 json.dump({"value": p["k"] * 2, "note": "x"}, open("result.json", "w"))
 """
 
@@ -144,13 +146,16 @@ class Sweep(Queue):
         self.assertIn("k：读回", " ".join(rec["detail"]))
 
     def test_failure_policy(self):
-        r = self.run_modes("oom", "license", "marker", "false_done", "ok")
+        r = self.run_modes("oom", "license", "marker", "false_done", "nan", "ok")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         oom = self.stage("oom")["solve"]
         self.assertEqual((oom["cause"], oom["attempts"]), ("memory", 1))     # 不重试
         lic = self.stage("license")["solve"]
         self.assertEqual((lic["status"], lic["attempts"]), ("done", 2))      # 重试一次后成功
         self.assertEqual(self.stage("false_done")["solve"]["cause"], "false_done")
+        nan = self.stage("nan")["solve"]
+        self.assertEqual(nan["cause"], "false_done")                         # 退出码 0，但结果是 NaN
+        self.assertIn("NaN", " ".join(nan["detail"]))
         self.assertEqual(self.stage("marker")["solve"]["status"], "needs_attention")
         self.assertEqual(self.stage("ok")["solve"]["status"], "done")
 
@@ -158,6 +163,60 @@ class Sweep(Queue):
         self.assertEqual(self.plan({"k": [1]}).returncode, 0)
         (self.base / "tpl" / "build.py").write_text("# changed\n" + BUILD, encoding="utf-8")
         self.assertEqual(self.plan({"k": [1, 2]}).returncode, 1)
+
+    def test_template_test_run_leftovers_ignored(self):
+        self.assertEqual(self.plan({"k": [1]}).returncode, 0)
+        (self.base / "tpl" / "work").mkdir()
+        (self.base / "tpl" / "work" / "native.tmp").write_text("x", encoding="utf-8")
+        (self.base / "tpl" / "CaseDriver.class").write_bytes(b"\xca\xfe")
+        r = self.plan({"k": [1, 2]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_half_made_case_cleaned_up(self):
+        self.assertEqual(self.plan({"k": [1]}).returncode, 0)
+        sys.path.insert(0, str(SCRIPTS))
+        import sweep
+        orphan = self.base / "cases" / sweep.case_id({"k": 2})
+        orphan.mkdir()
+        (orphan / "junk.txt").write_text("x", encoding="utf-8")
+        r = self.plan({"k": [1, 2]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse((orphan / "junk.txt").exists())
+
+    def test_build_stage_needs_max_h(self):
+        del self.spec["stages"][0]["max_h"]
+        r = self.plan({"k": [1]})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("max_h", r.stderr)
+
+    def test_broken_case_does_not_stop_others(self):
+        self.assertEqual(self.plan({"k": [1, 2]}).returncode, 0)
+        cases = sorted((self.base / "cases").iterdir())
+        (cases[0] / "manifest.json").write_text("{broken", encoding="utf-8")
+        r = self.call(SWEEP, "advance", self.file, "--wait", 120)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        state = self.state()["cases"]
+        self.assertEqual(state[cases[0].name]["stages"]["solve"]["cause"], "error")
+        self.assertEqual(state[cases[1].name]["stages"]["solve"]["status"], "done")
+        # 每个提交过的任务只提交一次
+        names = [json.loads((d / "job.json").read_text(encoding="utf-8"))["name"] for d in (self.home / "jobs").iterdir()]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_collect_flags_degenerate_and_tampered_gate(self):
+        r = self.plan({"k": [1], "x": [10, 20]})          # x 没有用到：两个算例结果完全相同
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.call(SWEEP, "advance", self.file, "--wait", 120).returncode, 0)
+        r = self.call(SWEEP, "collect", self.file)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结果完全相同", r.stdout)
+        run = next((self.base / "cases").iterdir())
+        gate = json.loads((run / "gate.json").read_text(encoding="utf-8"))
+        gate["criteria"][0]["threshold"] = 0                  # 运行后放宽阈值
+        (run / "gate.json").write_text(json.dumps(gate), encoding="utf-8")
+        self.call(SWEEP, "collect", self.file)
+        with open(self.base / "sweep_results.csv", encoding="utf-8-sig") as f:
+            rows = {r["case"]: r for r in csv.DictReader(f)}
+        self.assertEqual(rows[run.name]["gate:G1"], "BLOCKED")
 
     def test_case_limit(self):
         r = self.plan({"k": list(range(5))}, max_cases=3)

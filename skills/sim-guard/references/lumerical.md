@@ -18,14 +18,16 @@ lumapi 需要 numpy。系统 Python 没有时，模板会切换到 Lumerical 自
 
 ```json
 "readback": {
-  "dump": "readback.json",
-  "checks": [
-    {"path": "source.wavelength_center_m", "op": "approx", "value": 1.55e-6, "rel": 1e-6},
-    {"path": "fdtd.boundary_x_min", "op": "equals", "value": "PML"},
-    {"path": "material.index_diag", "op": "isotropic"}
+  "sources": {"rb": "readback.json"},
+  "expect": [
+    {"select": "rb:source.wavelength_center_m", "op": "approx", "value": 1.55e-6, "rel": 1e-6},
+    {"select": "rb:fdtd.boundary_*", "op": "one_of", "value": ["PML", "Periodic"]},
+    {"select": "rb:material.index_diag", "op": "isotropic"}
   ]
 }
 ```
+
+导出时，张量写成 1、4 或 9 个数的列表，就能用张量比较方式。旧写法 `dump` 加 `checks` 仍然可用。
 
 值从 `gate.json` 或设计文档来，不要从模型里抄。常见要核对的设置：
 

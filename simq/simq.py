@@ -446,6 +446,8 @@ def update_running(cfg, j):
     age = time.time() - hb.stat().st_mtime if hb.exists() else None
     since_start = (now() - started).total_seconds() if started else 0
     if (age is None and since_start > 120) or (age is not None and age > 180):
+        if runner_alive(d):
+            return   # 心跳停了但运行器还在，例如电脑刚从睡眠醒来：不要把它当成丢失，否则 license 和核会被重复分配
         if not requeue_lost(j):
             finalize(cfg, j, "lost", "运行器心跳中断（进程被杀或机器重启）")
         return
@@ -468,6 +470,13 @@ def process_created_near(pid, started, tolerance_s=120):
         _K32.CloseHandle(handle)
     created = times[0].value / 1e7 - 11644473600        # FILETIME 转 Unix 时间
     return abs(created - started) <= tolerance_s
+
+
+def runner_alive(jdir):
+    info = read_json(pathlib.Path(jdir) / "runner.json")
+    started = parse_iso((info or {}).get("started", ""))
+    pid = (info or {}).get("runner_pid")
+    return bool(pid and started and process_created_near(pid, started.timestamp()))
 
 
 def kill_leftovers(jdir):
@@ -639,7 +648,7 @@ def ensure_dispatcher(quiet=False):
             if not quiet:
                 print("（已启动后台调度器）")
             return True
-    print("警告：调度器没能启动，看 dispatcher.log")
+    print("警告：调度器没能启动，看 dispatcher.log", file=sys.stderr)   # 不写 stdout：调用方从 stdout 读 job id
     return False
 
 
@@ -673,10 +682,24 @@ def check_preflight(cfg, a, cwd):
     receipt = read_json(pathlib.Path(cwd) / ".simguard" / "receipt.json")
     if not receipt or receipt.get("status") != "PASS":
         sys.exit("没有通过的 preflight 回执：先跑 sg.py preflight <run_dir> --script <脚本>")
-    sha = hashlib.sha256(pathlib.Path(a.script).read_bytes()).hexdigest()
-    if receipt.get("script_sha256") != sha:
+    if receipt.get("script_sha256") != sha256_of(a.script):
         sys.exit("脚本在 preflight 之后改过：请重新跑 preflight")
+    changed = []
+    for rel, sha in (receipt.get("inputs") or {}).items():   # 驱动、判据、读回过的模型
+        p = pathlib.Path(rel) if pathlib.Path(rel).is_absolute() else pathlib.Path(cwd) / rel
+        if not p.is_file() or sha256_of(p) != sha:
+            changed.append(rel)
+    if changed:
+        sys.exit(f"这些文件在 preflight 之后改过或不见了：{changed}；请重新跑 preflight")
     return {k: receipt.get(k) for k in ("created", "script_sha256", "gate_sha256")}
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def cmd_submit(a):
@@ -690,6 +713,11 @@ def cmd_submit(a):
     cwd = str(pathlib.Path(a.cwd or os.getcwd()).resolve())
     if not pathlib.Path(cwd).is_dir():
         sys.exit(f"cwd 不存在：{cwd}")
+    if a.script and not pathlib.Path(a.script).is_absolute():
+        in_cwd = pathlib.Path(cwd, a.script)       # 相对路径先按 --cwd 解析，和 --resume-script 一致
+        a.script = str(in_cwd if in_cwd.exists() else pathlib.Path(a.script).resolve())
+    if a.script and not pathlib.Path(a.script).is_file():
+        sys.exit(f"脚本不存在：{a.script}")
     preflight = check_preflight(cfg, a, cwd)
     after = [resolve_id(x) for x in a.after.split(",") if x.strip()] if a.after else []
     jid = new_id(a.line)
