@@ -9,11 +9,14 @@ sweep.py —— 参数扫描和多阶段任务链，只依赖 Python 标准库�
   python sweep.py collect <sweep.json>              汇总结果并按判据判定，写 sweep_results.csv
 
 advance 的退出码：0 = 全部完成，1 = 没有在跑的了，但有算例停下等人处理，3 = 还有任务未结束。
-状态在 sweep_state.json 里。重复运行不会重复提交，已完成的算例不会重算。
+collect 的退出码：0 = 没发现问题，1 = 有判据被改过、结果文件坏了，或参数不同而结果完全相同。
+状态在 sweep_state.json 里，每个算例处理完就保存。重复运行不会重复提交，已完成的算例不会重算；
+plan、advance、retry 互斥，同一个扫描同时只能运行一个。
 """
 import argparse
 import contextlib
 import csv
+import fnmatch
 import hashlib
 import io
 import itertools
@@ -27,13 +30,35 @@ import time
 import sg
 
 STATE_FILE = "sweep_state.json"
+LOCK_FILE = ".sweep.lock"
 RESULTS_FILE = "sweep_results.csv"
 DEFAULT_MAX_CASES = 200
 DEFAULT_MAX_RETRY = 1
 POLL_S = 15
 FINAL = ("done", "needs_attention")
 JOB_STATUS = re.compile(r"\s(pending|running|done|failed|cancelled|timeout|lost)\s")
-SKIP_COPY = shutil.ignore_patterns("__pycache__", "*.class", ".simguard", "work")
+SKIP_NAMES = ("__pycache__", "*.class", ".simguard", "work")   # 复制模板和计算模板哈希都忽略这些
+SKIP_COPY = shutil.ignore_patterns(*SKIP_NAMES)
+
+
+@contextlib.contextmanager
+def exclusive(base):
+    """同一个扫描同时只能有一个 advance，否则会重复提交。"""
+    f = open(pathlib.Path(base) / LOCK_FILE, "a+")
+    try:
+        try:
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except ImportError:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise sg.UsageError("另一个 advance 正在推进这个扫描；等它结束再运行")
+    try:
+        yield
+    finally:
+        f.close()
 
 
 # ---------------------------------------------------------------- 展开和生成
@@ -53,6 +78,8 @@ def load_sweep(path):
                 errs.append(f"阶段缺少 {key}：{stage}")
         if not stage.get("outputs"):
             errs.append(f"阶段 {stage.get('name')} 要写 outputs：有些求解器失败时退出码也是 0")
+        if not stage.get("guarded") and not stage.get("max_h"):
+            errs.append(f"阶段 {stage.get('name')} 不是 guarded，会作为短测试提交，要写 max_h（不超过 simq 的 smoke_max_h，默认 0.5）")
     if not any(stage.get("guarded") for stage in sweep.get("stages") or []):
         errs.append("至少要有一个 guarded 阶段，正式求解要先通过 preflight")
     if errs:
@@ -85,10 +112,16 @@ def case_id(params):
     return "c_" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
+def skipped(rel):
+    return any(fnmatch.fnmatch(part, pat) for part in rel.parts for pat in SKIP_NAMES)
+
+
 def tree_hash(root):
+    """只算会被复制进算例的文件：在模板里试跑留下的编译产物和 work 目录不算改动。"""
+    root = pathlib.Path(root)
     h = hashlib.sha256()
-    for f in sorted(p for p in pathlib.Path(root).rglob("*") if p.is_file() and "__pycache__" not in p.parts):
-        h.update(str(f.relative_to(root)).encode("utf-8"))
+    for f in sorted(p for p in root.rglob("*") if p.is_file() and not skipped(p.relative_to(root))):
+        h.update(f.relative_to(root).as_posix().encode("utf-8"))
         h.update(sg.sha256_file(f).encode("ascii"))
     return h.hexdigest()
 
@@ -109,15 +142,21 @@ def substitute(value, params):
 def make_case(base, sweep, template, params):
     cid = case_id(params)
     run = base / "cases" / cid
-    shutil.copytree(template, run, ignore=SKIP_COPY)
-    manifest = substitute(sg.read_json(run / "manifest.json"), params)
-    manifest.update(run_id=f"{sweep['name']}_{cid}", line=sweep["line"], solver=sweep["solver"], jobs=[])
-    sg.write_json(run / "manifest.json", manifest)
-    sg.write_json(run / "params.json", params)
-    with contextlib.redirect_stdout(io.StringIO()) as out:
-        code = sg.cmd_freeze(argparse.Namespace(run_dir=str(run), amend=None))
-    if code:
-        raise sg.UsageError(f"{cid} 判据冻结失败：{out.getvalue()}")
+    if run.exists():            # 上次 plan 中途失败留下的半成品：状态里没有它，没有提交过任务
+        shutil.rmtree(run)
+    try:
+        shutil.copytree(template, run, ignore=SKIP_COPY)
+        manifest = substitute(sg.read_json(run / "manifest.json"), params)
+        manifest.update(run_id=f"{sweep['name']}_{cid}", line=sweep["line"], solver=sweep["solver"], jobs=[])
+        sg.write_json(run / "manifest.json", manifest)
+        sg.write_json(run / "params.json", params)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = sg.cmd_freeze(argparse.Namespace(run_dir=str(run), amend=None))
+        if code:
+            raise sg.UsageError(f"{cid} 判据冻结失败：{out.getvalue()}")
+    except Exception:
+        shutil.rmtree(run, ignore_errors=True)
+        raise
     return cid
 
 
@@ -137,13 +176,14 @@ def cmd_plan(a):
     if state["template_sha256"] != digest:
         return sg.fail_list("模板已改过", ["同一个扫描不能混用不同版本的模板；请用新的扫描目录"])
     added = 0
+    sg.write_json(state_f, state)
     for params in cases:
         cid = case_id(params)
         if cid not in state["cases"]:
             make_case(base, sweep, template, params)
             state["cases"][cid] = {"params": params, "stages": {}}
+            sg.write_json(state_f, state)      # 每生成一个就保存，中途失败也不丢已完成的
             added += 1
-    sg.write_json(state_f, state)
     stages = sweep["stages"]
     print(f"算例 {len(cases)} 个，新增 {added} 个；阶段：{' → '.join(s['name'] for s in stages)}")
     est = [s.get("est_h") for s in stages]
@@ -155,11 +195,10 @@ def cmd_plan(a):
 # ---------------------------------------------------------------- 推进
 
 def job_state(simq, job_id):
+    """只信 simq 输出里的状态。读不到（例如 job.json 正在写）就当作 unknown，下一轮再看，不判失败。"""
     done = sg.simq_call(simq, "wait", job_id, "--timeout", 0)
     match = JOB_STATUS.search(done.stdout)
-    if match:
-        return match[1]
-    return "failed" if done.returncode == 1 else "running"
+    return match[1] if match else "unknown"
 
 
 def outputs_fresh(run, stage, since):
@@ -172,15 +211,23 @@ def outputs_fresh(run, stage, since):
     return missing
 
 
+def outputs_broken(run, stage):
+    """JSON 产物要能读，而且没有 NaN 或无穷大。"""
+    paths = {pathlib.Path(o).stem: o for o in stage["outputs"] if str(o).lower().endswith(".json")}
+    sources, errs = sg.load_sources(run, paths)
+    return errs + sg.nonfinite_errors(sources)
+
+
 def supports_smoke(simq):
     return "--smoke" in sg.simq_call(simq, "submit", "--help").stdout
 
 
 def submit_stage(simq, run, sweep, stage, rec):
     script = sg.resolve_script(run, stage["script"]).resolve()
+    gate_sha = None
     if stage.get("guarded"):
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            passed = sg.run_preflight(run, script, sweep["solver"])
+            passed, gate_sha = sg.run_preflight(run, script, sweep["solver"])
         if not passed:
             rec.update(status="needs_attention", cause="preflight",
                        detail=[x.strip() for x in out.getvalue().splitlines() if x.strip().startswith("- ")])
@@ -197,26 +244,34 @@ def submit_stage(simq, run, sweep, stage, rec):
     if done.returncode:
         rec.update(status="needs_attention", cause="submit", detail=[done.stderr.strip()])
         return
-    job = done.stdout.strip().splitlines()[-1]
+    job = sg.parse_job_id(done.stdout)
+    if not job:
+        rec.update(status="needs_attention", cause="submit",
+                   detail=[f"simq 没有返回 job id，先用 simq list 确认是否已提交：{done.stdout.strip()}"])
+        return
     rec.update(status="active", job=job, submitted_ts=time.time(), attempts=rec.get("attempts", 0) + 1)
     rec.setdefault("jobs", []).append(job)
     if stage.get("guarded"):
-        manifest = sg.read_json(run / "manifest.json")
-        manifest["jobs"] = (manifest.get("jobs") or []) + [job]
-        sg.write_json(run / "manifest.json", manifest)
+        sg.record_job(run, job, gate_sha)
+    else:
+        sg.record_job(run, job, key="build_jobs")
 
 
 def settle(simq, run, stage, rec, max_retry):
     """任务结束后判定这个阶段：done、重试，或停下等人。"""
     status = job_state(simq, rec["job"])
-    if status in ("pending", "running"):
+    if status in ("pending", "running", "unknown"):
         return
     if status == "done":
         missing = outputs_fresh(run, stage, rec["submitted_ts"])
-        if not missing:
-            rec.update(status="done")
+        if missing:
+            rec.update(status="needs_attention", cause="false_done", detail=[f"任务显示 done，但缺少这次的产物：{missing}"])
             return
-        rec.update(status="needs_attention", cause="false_done", detail=[f"任务显示 done，但缺少这次的产物：{missing}"])
+        broken = outputs_broken(run, stage)
+        if broken:
+            rec.update(status="needs_attention", cause="false_done", detail=["任务显示 done，但产物有问题"] + broken)
+            return
+        rec.update(status="done")
         return
     if status == "cancelled":
         rec.update(status="needs_attention", cause="cancelled", detail=["任务被取消"])
@@ -235,10 +290,16 @@ def advance_case(simq, base, sweep, cid, case):
     max_retry = sweep.get("max_retry", DEFAULT_MAX_RETRY)
     for stage in sweep["stages"]:
         rec = case["stages"].setdefault(stage["name"], {"status": "new"})
-        if rec["status"] == "active":
-            settle(simq, run, stage, rec, max_retry)
-        if rec["status"] == "new":
-            submit_stage(simq, run, sweep, stage, rec)
+        try:
+            if rec["status"] == "active":
+                settle(simq, run, stage, rec, max_retry)
+            if rec["status"] == "new":
+                submit_stage(simq, run, sweep, stage, rec)
+        except Exception as e:      # 一个算例出错只停这一个，不中断整轮
+            if rec["status"] == "active":
+                rec.setdefault("errors", []).append(f"{type(e).__name__}: {e}")   # 任务还在跑，下一轮再看
+            else:
+                rec.update(status="needs_attention", cause="error", detail=[f"{type(e).__name__}: {e}"])
         if rec["status"] != "done":
             return
 
@@ -276,7 +337,7 @@ def cmd_advance(a):
     while True:
         for cid, case in state["cases"].items():
             advance_case(simq, base, sweep, cid, case)
-        sg.write_json(base / STATE_FILE, state)
+            sg.write_json(base / STATE_FILE, state)    # 每个算例之后都保存：中途被杀也不会丢 job id、重复提交
         n = counts(state, sweep)
         if not n["active"] or time.time() >= deadline:
             break
@@ -346,21 +407,56 @@ def judge(criteria, result):
     return verdicts
 
 
+def collect_case(run, kind):
+    """返回 (结果, 判据结论, 问题)。判据被改过或结果坏了，结论记 BLOCKED，不拿新阈值判。"""
+    problems = []
+    criteria = sg.read_json(run / "gate.json").get("criteria", [])
+    if kind != "done":
+        return {}, {c["id"]: "NOT_RUN" for c in criteria}, problems
+    lock_errs, gate_sha = sg.gate_lock_errors(run)
+    problems += lock_errs + (sg.submitted_gate_errors(run, gate_sha) if gate_sha else [])
+    result = {}
+    result_f = run / "result.json"
+    if result_f.is_file():
+        try:
+            result = sg.read_json(result_f)
+            if not isinstance(result, dict):
+                raise sg.UsageError("result.json 要是一个对象")
+        except sg.UsageError as e:
+            problems.append(str(e))
+            result = {}
+    problems += sg.result_errors(run, sg.read_json(run / "manifest.json"))
+    if lock_errs or (problems and not result):
+        return result, {c["id"]: "BLOCKED" for c in criteria}, problems
+    return result, judge(criteria, result), problems
+
+
+def degenerate_keys(rows, params):
+    """参数取值不同，结果却完全相同：常见于参数没有真的传进模型（A2）。"""
+    done = [r for r in rows if r["state"] == "done"]
+    if len(done) < 2 or len({json.dumps([r.get(f"param:{p}") for p in params]) for r in done}) < 2:
+        return []
+    keys = {k for r in done for k, v in r.items() if isinstance(v, (int, float)) and not k.startswith(("param:", "gate:"))}
+    return sorted(k for k in keys if len({r.get(k) for r in done}) == 1)
+
+
 def cmd_collect(a):
     base, sweep = load_sweep(a.sweep)
     state = load_state(base)
-    rows = []
+    rows, issues = [], []
     for cid, case in state["cases"].items():
         run = base / "cases" / cid
         kind = overall(case, sweep)[0]
-        result_f = run / "result.json"
-        result = sg.read_json(result_f) if kind == "done" and result_f.is_file() else {}
-        criteria = sg.read_json(run / "gate.json").get("criteria", [])
-        verdicts = judge(criteria, result) if kind == "done" else {c["id"]: "NOT_RUN" for c in criteria}
+        try:
+            result, verdicts, problems = collect_case(run, kind)
+        except sg.UsageError as e:
+            result, verdicts, problems = {}, {}, [str(e)]
+        issues += [f"{cid}：{p}" for p in problems]
         row = {"case": cid, "state": kind}
         row.update({f"param:{k}": v for k, v in case["params"].items()})
         row.update({k: v for k, v in result.items() if isinstance(v, (int, float, str))})
         row.update({f"gate:{k}": v for k, v in verdicts.items()})
+        row["problems"] = "；".join(problems)
         rows.append(row)
     fields = []
     for row in rows:
@@ -371,8 +467,13 @@ def cmd_collect(a):
         writer.writerows(rows)
     gates = [v for row in rows for k, v in row.items() if k.startswith("gate:")]
     print(f"已写 {base / RESULTS_FILE}：{len(rows)} 个算例，判据 PASS {gates.count('PASS')}，FAIL {gates.count('FAIL')}，"
-          f"未运行 {gates.count('NOT_RUN')}，需人工 {gates.count('MANUAL')}")
-    return 0
+          f"未运行 {gates.count('NOT_RUN')}，需人工 {gates.count('MANUAL')}，无法判定 {gates.count('BLOCKED')}")
+    flat = degenerate_keys(rows, list(sweep["params"]))
+    if flat:
+        issues.append(f"参数不同但结果完全相同：{flat}。先确认参数真的传进了模型，再用这些结果")
+    for i in issues:
+        print(f"  - {i}")
+    return 1 if issues else 0
 
 
 def main():
@@ -393,6 +494,9 @@ def main():
     s.set_defaults(fn=cmd_retry)
     a = ap.parse_args()
     try:
+        if a.command in ("plan", "advance", "retry"):     # 会改状态的命令互斥
+            with exclusive(pathlib.Path(a.sweep).resolve().parent):
+                return a.fn(a)
         return a.fn(a)
     except sg.UsageError as e:
         print(f"错误：{e}", file=sys.stderr)

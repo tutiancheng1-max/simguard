@@ -38,6 +38,8 @@ python simq.py <命令>
 | `dispatcher [start\|stop\|status]` | 调度器。submit 时会自动拉起；stop 不影响在跑的任务 |
 | `idle` | 队列空且没有任务在跑时，退出码为 0 |
 
+`--script` 的相对路径先按 `--cwd` 解析。`submit` 的标准输出只有 job id，警告写到标准错误，调用方可以放心解析。
+
 `<id>` 写能唯一识别的一段即可。可选参数：`--max-h`（超过这么多小时强制终止）、`--prio`、`--note`、`--smoke`、`--resume-script`、`--max-resume`。
 
 `--sw` 可选 comsol / lumerical / fluent / matlab / python / other。只有在 `licenses` 里配置的软件才占 license。
@@ -66,7 +68,7 @@ python simq.py <命令>
 | `licenses` | 每种软件的 license 数 |
 | `line_priority` | 研究线优先级，数字大的先跑 |
 | `reserve_after_h` | 排在前面的任务等待多久后，开始为它预留资源 |
-| `require_preflight` | `true` 时，正式任务必须带 sim-guard 的通过回执，且脚本未改动 |
+| `require_preflight` | `true` 时，正式任务必须带 sim-guard 的通过回执，且回执覆盖的文件（脚本、驱动、判据、读回过的模型）都没改动 |
 | `smoke_max_h` | `--smoke` 免回执，但必须给不超过这个值的 `--max-h` |
 | `allow_prio_override` | `false` 时不允许用 `--prio` 插队 |
 | `stall_min` | CPU 和日志都这么多分钟没变化时，`health` 判为 STALLED。只报告，不杀任务 |
@@ -81,4 +83,5 @@ python simq.py <命令>
 - 排在前面的任务资源不够时，后面的小任务可以先跑。前面的任务等满 `reserve_after_h` 后：
   - 如果它卡在核数或内存上，后面的任务不再插队；
   - 如果它卡在 license 上，后面不占这个 license 的任务仍可用空闲的核，只预留同软件任务结束后它仍缺的核数。
-- 任务状态有：pending、running、done、failed、cancelled、timeout、lost（运行器心跳中断，例如重启，需要重新提交）。
+- 任务状态有：pending、running、done、failed、cancelled、timeout、lost（运行器进程不在了，例如重启，需要重新提交）。
+- 心跳超时但运行器进程还在时（例如电脑刚从睡眠醒来），任务保持 running，不会被判为 lost，它占的 license 和核也不会被重复分配。

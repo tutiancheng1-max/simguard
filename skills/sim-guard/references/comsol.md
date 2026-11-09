@@ -27,20 +27,41 @@ feature("cfeq1").set("c", new String[]{expr, "0[W/m/K]", "0[W/m/K]", expr});
 
 `.mph` 是 zip 文件，根目录的 `dmodel.xml` 存着模型设置。`sg.py readback` 直接读它，不需要 COMSOL，也不占 license。
 
-在 `manifest.json` 里这样写：
+先列出模型里有哪些值：
+
+```
+python sg.py readback models/prepared.mph --list
+```
+
+键的形式：
+
+| 键 | 内容 |
+|---|---|
+| `param/<名>` | 全局参数，例如 `param/lambda0 = '2250[nm]'` |
+| `physics/<物理场>/<特征>/<参数>` | 物理场设置，例如 `physics/pde/cfeq1/c` |
+| `material/<材料>/<属性组>/<参数>` | 材料属性，例如 `material/W/def/relpermittivity` |
+
+张量是 1、4 或 9 个分量的列表。然后在 `manifest.json` 里写期望：
 
 ```json
 "readback": {
-  "comsol_tensor_models": ["models/prepared.mph"],
-  "anisotropic_ok": [{"physics": "tte", "feature": "cfeq1", "reason": "这里确实是各向异性"}]
+  "sources": {"model": "models/prepared.mph"},
+  "expect": [
+    {"select": "model:physics/*/*/c", "op": "isotropic", "physics_op": ["CoefficientFormPDE"]},
+    {"select": "model:param/k", "op": "equals", "value": 2},
+    {"select": "model:material/*/*/thermalconductivity", "op": "nonzero"}
+  ],
+  "allow": [{"key": "model:physics/pde2/cfeq1/c", "reason": "这里确实是各向异性"}]
 }
 ```
 
-- 默认检查标签为 `tte`、`ttl`、`tts` 的物理场，以及场变量为 `T`、`Te`、`Tl` 的系数型 PDE。其他模型要在 `simguard.project.json` 的 `comsol_tensor` 里配置。
-- 没找到目标张量时，结果是 FAIL。这通常说明标签配错了，不能当作没有问题。
-- 目前只自动检查系数型 PDE 的 `c`。COMSOL 内置的传热接口用 `k`，需要自己导出读回并用 `dump` 和 `checks` 核对。
+- 不写任何期望时，内置的 `no_partial_default` 仍会检查所有张量（物理场和材料）：对角线上一部分是默认值 1、另一部分不是，就判 FAIL。它不需要知道物理场的名字。
+- `physics_op` 按物理场类型筛选，例如 `CoefficientFormPDE`、`HeatTransfer`。
+- `select` 没匹配到值时判 FAIL。通常是键写错了，不能当作没有问题。
+- 内置传热接口的导热系数在材料里（`material/.../thermalconductivity`），不在物理场里。
 - 还要核对运行时真正使用的模型，不只是建模阶段保存的副本。
 - 轴对称模型要确认 `r` 权重写进了 `c`、`a`、`f`、`da` 和界面通量。
+- 旧写法 `comsol_tensor_models`、`comsol_params`、`anisotropic_ok` 仍然可用，会被自动转换。
 
 ## 运行
 

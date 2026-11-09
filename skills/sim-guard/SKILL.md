@@ -7,6 +7,8 @@ description: 让 agent 安全地规划、提交和报告长时间科学仿真：
 
 长时间仿真最贵的错误，是模型设错却仍然算得出看似合理的结果，还通过了校准。本 skill 的流程就是为了尽早抓住这类错误。它的检查写在脚本里：文字可能被忽略，脚本的结果不会。
 
+这类错误分成几大类，每类都有对应的检查，见 [references/failure-modes.md](references/failure-modes.md)。检查按错误的一般形式设计，不针对某个具体模型。
+
 下文的 `sg.py` 指本 skill 的 `scripts/sg.py`，用它的绝对路径调用。
 
 ## 开始前
@@ -55,12 +57,38 @@ python sg.py freeze <run_dir>
 - 按求解器读取注意事项：[references/comsol.md](references/comsol.md)、[references/lumerical.md](references/lumerical.md)。
 - 脚本读取 `SIMQ_CORES` 设定线程数。长任务要能续跑。
 - 用文献公式前，先复现原文的一张图或一个数，记入 `manifest.literature`。原文公式也可能和它自己的图不一致。
-- 关闭某项物理效应时，用测试确认它真的关了，记入 `manifest.switch_tests`。参数名可能和实际行为不符。
+- 声称某个输入有影响（或没有影响）时，用响应测试证明：改它，看输出是否按预期变化。关闭某项物理效应也是一种响应测试。参数名可能和实际行为不符。写进 `manifest.response_tests`，数字从结果文件里读，脚本判定：
+
+  ```json
+  {"id": "R1", "knob": "焦耳热=off", "expect": "ratio", "ratio": [0, 0.01],
+   "baseline": {"file": "on/result.json", "key": "dT"}, "perturbed": {"file": "off/result.json", "key": "dT"}}
+  ```
+
+  `expect` 可以是 `changes`、`unchanged`、`increases`、`decreases`、`ratio`。
 - 内存先用小测试实测，再写入 `resources`。内存可能随线程数增长，线程多不一定更快。
 
 ### 4. 读回已保存的模型
 
-把模型保存后再检查保存下来的文件。建模代码看起来对，不代表模型里的值对。把模型写入 `manifest.readback`，由 `preflight` 核对。
+把模型保存后再检查保存下来的文件。建模代码看起来对，不代表模型里的值对。在 `manifest.readback` 里写读回源和期望，由 `preflight` 核对：
+
+```json
+"readback": {
+  "sources": {"model": "prepared.mph", "rb": "readback.json"},
+  "expect": [
+    {"select": "model:param/lambda0", "op": "approx", "value": 1550, "rel": 1e-9},
+    {"select": "model:physics/*/*/c", "op": "isotropic", "physics_op": ["CoefficientFormPDE"]},
+    {"select": "model:material/*/*/relpermittivity", "op": "diagonal"},
+    {"select": "rb:source.wavelength_m", "op": "range", "min": 1.5e-6, "max": 1.6e-6}
+  ],
+  "allow": [{"key": "model:material/film/def/relpermittivity", "reason": "薄膜确实是单轴各向异性"}]
+}
+```
+
+- 读回源可以是 `.mph`（直接读文件，不需要 COMSOL）或求解器导出的 JSON。先用 `sg.py readback <文件> --list` 看有哪些键。
+- 比较方式：`equals`、`differs`、`one_of`、`approx`、`range`、`nonzero`、`finite`、`present`，以及张量的 `isotropic`、`diagonal`、`symmetric`、`no_partial_default`。
+- `select` 没匹配到任何值时判 FAIL：键写错了不能当作没问题。
+- `.mph` 读回源默认还会检查所有张量是否只设了一部分分量（`no_partial_default`），不需要知道物理场的名字。
+- 期望值从 `gate.json` 或设计文档来，不要从模型里抄。
 
 所以建模阶段要先于 `sg.py submit` 运行：用 `simq submit --script build.py ... --max-h 0.5` 提交；开启了 `require_preflight` 的队列再加 `--smoke`。几分钟内的调试也可以用交互式 MCP。
 
@@ -86,7 +114,22 @@ python sg.py submit <run_dir> --script run.ps1 --sw comsol --est 3
 python sg.py report <run_dir>
 ```
 
-先按模板填完 `REPORT.md` 的每一段再运行：`判据结果` 表每条判据一行，`检查` 表每项都给状态和证据。没做的检查就写 `NOT_DONE`：报告的价值在于让读者知道哪些还没验证。必查项没做时，脚本不接受 `Overall: PASS`。
+先按模板填完 `REPORT.md` 的每一段再运行：`判据结果` 表每条判据正好一行，结论写 PASS、FAIL 或 NOT_DONE；`检查` 表每项都给状态和证据。没做的检查就写 `NOT_DONE`：报告的价值在于让读者知道哪些还没验证。`independent_validation` 和 `readback` 不能写 `NA`。
+
+下面任何一种情况，脚本都不接受 `Overall: PASS`：必查项没做或没通过；有判据不是 PASS；结果文件里有 NaN；`manifest.result_expect` 不满足。
+
+`result_expect` 用和读回同样的规则检查结果，另外有两种跨多个值的比较：
+
+```json
+"result_expect": [
+  {"op": "sum_approx", "keys": ["result:R", "result:T", "result:A"], "value": 1, "rel": 1e-3},
+  {"op": "converged", "keys": ["result:T_coarse", "result:T_fine"], "rel": 0.01}
+]
+```
+
+`converged` 发现各级结果完全相同时也会报错：那样的收敛检查不可能失败，什么也没证明。
+
+报告里的每个数字都要说清是估计值、上限还是下限。理想化条件下得到的数字不能当作预期值。
 
 ## 遇到决定时
 
@@ -100,5 +143,6 @@ python sg.py report <run_dir>
 如果发现已有结果可能受错误影响：
 
 1. 不要静默修复。告诉用户。
-2. 用 `provenance.json` 和搜索列出受影响的 run 和数字。
-3. 把错误写法加进项目的 `forbidden_patterns`，在受影响的目录放 `DO_NOT_REUSE` 说明。这样同一个错误不会第二次发生。
+2. 运行 `sg.py taint <有错的 run 目录> --reason "..."`。它会写 `DO_NOT_REUSE.md`，并沿着 `derived_from` 列出所有派生的运行，包括派生的派生。把清单和其中的数字报告给用户。
+3. 按 [references/failure-modes.md](references/failure-modes.md) 开头的步骤，把这次的错误归到一类，加一条能自动抓住它的检查，写进项目的 `simguard.project.json`。
+4. 故意做一个带这个错误的版本，确认新检查会失败。抓不住错误的检查不算防线。

@@ -7,22 +7,20 @@
 - **`simq`**：单机仿真队列。多个对话和子 agent 共用一台机器时，按核数、内存和 license 排队，求解进程不依赖提交它的 agent。
 - **`sim-guard` skill**：给 Claude Code 用的流程和检查脚本。它限定 agent 的工作范围，在提交前读回已保存的模型，冻结判据，并要求报告写明没做的检查。
 
-**English summary:** a single-machine solver queue plus a Claude Code skill that makes agents read back saved models, freeze pass/fail criteria before running, use independent validation, and report what was not checked. The docs are in Chinese.
+**English summary:** a single-machine solver queue plus a Claude Code skill that makes agents read back saved models, freeze pass/fail criteria before running, use independent validation, and report what was not checked. See [README.en.md](README.en.md). The detailed docs are in Chinese.
 
 ## 它解决什么问题
 
-| 问题 | 机制 |
-|---|---|
-| 张量只设了一个分量，模型照常能算 | 不开求解器，直接读回 `.mph` 并核对 |
-| 校准通过，但基准和模型带同一个错误 | 判据里不接受“和旧结果一致”作为校验 |
-| 新脚本从有 bug 的旧脚本复制而来 | 搜索已知错误写法，拒绝带不可复用标记的来源 |
-| 看到结果后调整通过标准 | 判据先冻结并记录哈希，修改留下历史 |
-| 参数名写着关闭，效果却没关 | 开关测试不通过就不能提交 |
-| 报告写通过，但网格收敛没做 | 必查项没做时，不接受 `Overall: PASS` |
-| 子 agent 越界、插队或绕过排队 | 工作范围清单、任务模板、队列端回执检查 |
-| 求解器出错，退出码却是 0 | 查日志标记和产物，不把它记成成功 |
-| 扫描的所有算例其实用了同一个参数 | 每个算例读回自己的参数 |
-| 分不清任务是慢还是卡死 | 监控进程树的 CPU、内存和日志 |
+仿真最贵的错误是“模型能算、结果看起来合理，但其实不对”。这些错误按一般形式分成四大类，每类都有对应的检查。完整的分类见 [failure-modes.md](skills/sim-guard/references/failure-modes.md)。
+
+| 大类 | 一般形式 | 例子 | 机制 |
+|---|---|---|---|
+| A 设置类 | 保存下来的模型和你以为的不一样 | 张量只设了一个分量；扫描参数没写进模型；开关名不副实 | 读回保存的文件并按声明的期望核对（`.mph` 直接解析，其他求解器导出 JSON）；内置检查所有张量是否只设了一部分；响应测试按数字判定输入是否真的起作用 |
+| B 执行类 | 结果不是这次算出来的 | 出错但退出码为 0；结果里有 NaN；提交后又改了驱动 | 日志错误标记、产物新鲜度和有限值检查；preflight 回执覆盖脚本、驱动、判据和模型 |
+| C 验证类 | 校验本身不可能失败 | 基准和模型带同一个错误；各级网格结果完全相同；守恒没闭合 | 校验必须独立于模型代码；`converged`、`sum_approx` 结果期望 |
+| D 过程类 | 流程被绕过 | 看结果改阈值；从有错的旧脚本复制；绕过排队 | 判据冻结并在提交、报告、汇总时核对哈希；`DO_NOT_REUSE` 标记和 `sg.py taint` 追踪下游运行；工作范围和队列回执 |
+
+遇到新的错误时，按 failure-modes.md 开头的步骤归类，再加一条能自动抓住它的检查。这样同一类错误不会第二次发生。
 
 ## 依赖
 
@@ -62,7 +60,8 @@ Copy-Item -Recurse skills\sim-guard $HOME\.claude\skills\sim-guard
 | `approved_templates` | 设置后，`derived_from` 只能来自这些路径 |
 | `do_not_reuse_markers` | 目录里有这些文件名时，不能复用其中的脚本 |
 | `forbidden_patterns` | 项目已知的错误写法 |
-| `comsol_tensor` | 要检查哪些物理场的张量 |
+| `readback_expect` | 对本项目所有运行都生效的读回期望 |
+| `builtin_readback` | 设为 `false` 可关闭内置的张量检查 |
 | `required_report_checks` | 报告必须多回答哪些检查 |
 
 **5. 把规则写进项目的 CLAUDE.md（推荐）**
@@ -88,8 +87,10 @@ python sg.py report runs\case1
 你也可以手动检查已有的文件：
 
 ```powershell
-python sg.py readback model.mph
+python sg.py readback model.mph            # 内置张量检查
+python sg.py readback model.mph --list     # 列出模型里所有参数、物理场和材料设置
 python sg.py scan path\to\drivers
+python sg.py taint runs\old_run --reason "张量只设了一个分量"   # 找出所有从它派生的运行
 ```
 
 ## 端到端测试
@@ -117,9 +118,10 @@ python sweep.py collect sweep.json
 
 这些检查能减少错误，但不能证明模型正确。
 
-- 张量读回只自动覆盖 COMSOL 系数型 PDE 的 `c`。其他设置和其他求解器，要由 agent 导出 JSON 并配置核对项。
-- `manifest`、`gate` 和报告里的内容由 agent 填写。开关测试是否真的做过、`shares_code_with_model` 是否属实、报告证据是否可靠，脚本只能看到记录，需要人或另一个 agent 复核。
-- `switch_tests` 和 `literature` 留空时，脚本视为没有相关项。
+- `.mph` 可以直接解析全局参数、物理场设置和材料属性。Lumerical、Fluent 等求解器没有内置解析，要由 agent 导出 JSON 再配置期望。
+- 内置的 `no_partial_default` 只是启发式：真正各向异性、恰好某个分量等于 1 的张量会被误报，要在 `readback.allow` 里写明原因。
+- `manifest`、`gate` 和报告里的内容由 agent 填写。`shares_code_with_model` 是否属实、报告证据是否可靠，脚本只能看到记录，需要人或另一个 agent 复核。响应测试的数字可以从结果文件读取，但哪个文件对应哪次运行仍由 agent 填写。
+- `response_tests`、`switch_tests` 和 `literature` 留空时，脚本视为没有相关项。
 - 回执是普通文件，这些检查防的是疏忽和偷懒，不防故意伪造。
 - 判据冻结只防止运行后被修改，不能保证判据本身合理。
 - 除非加 hook，否则 agent 仍有可能直接启动求解器。

@@ -30,13 +30,13 @@ def comsol_bin():
 
 
 def compile_java(bin_dir, stage):
-    run_dir = HERE.as_posix()
     params_file = HERE / "params.json"
     params = json.loads(params_file.read_text(encoding="utf-8-sig")) if params_file.exists() else {}
+    # json.dumps 把非 ASCII 字符写成 \uXXXX，Java 也认；这样中文路径不受 comsolcompile 读文件编码的影响
     rows = ", ".join(f"{{{json.dumps(str(k))}, {json.dumps(str(v))}}}" for k, v in params.items())
     (HERE / "CaseConfig.java").write_text(
-        f'public class CaseConfig {{\n  static final String RUN_DIR = "{run_dir}";\n'
-        f'  static final String STAGE = "{stage}";\n'
+        f'public class CaseConfig {{\n  static final String RUN_DIR = {json.dumps(HERE.as_posix())};\n'
+        f'  static final String STAGE = {json.dumps(stage)};\n'
         f'  static final String[][] PARAMS = {{{rows}}};\n}}\n', encoding="utf-8")
     for name in ("CaseConfig", DRIVER):
         code = subprocess.call([str(bin_dir / "comsolcompile.exe"), "-classpathadd", str(HERE),
@@ -69,7 +69,11 @@ def main(stage):
         text += log.read_text(encoding="utf-8", errors="replace")
     match = re.search(r"^SG_RESULT\|(.*)$", text, re.M)
     if match:
-        (HERE / "result.json").write_text(match[1] + "\n", encoding="utf-8")
+        try:
+            result = json.loads(match[1])
+        except json.JSONDecodeError as e:
+            sys.exit(f"SG_RESULT 不是合法 JSON（{e}）：{match[1][:200]}")
+        (HERE / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if code:
         sys.exit(f"comsolbatch 退出码 {code}")
     if ERROR_MARK in text:

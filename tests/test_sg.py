@@ -101,7 +101,7 @@ class Readback(Base):
         self.ready()
         r = self.preflight()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("张量读回不通过", r.stdout)
+        self.assertIn("physics/tte/cfeq1/c", r.stdout)
         self.assertFalse((self.run_dir / ".simguard" / "receipt.json").exists())
 
     def test_no_target_tensor_is_not_a_pass(self):
@@ -127,7 +127,7 @@ class Readback(Base):
         self.write()
         r = self.preflight()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("参数 k", r.stdout)
+        self.assertIn("param/k", r.stdout)
 
     def test_dump_checks(self):
         (self.run_dir / "rb.json").write_text(json.dumps({"s": {"w": 1.55e-6}, "n": [1, 2]}), encoding="utf-8")
@@ -194,11 +194,12 @@ class Drivers(Base):
 
 
 class Report(Base):
-    def report(self, overall, conv="PASS"):
+    def report(self, overall, conv="PASS", g1="PASS", rb="PASS"):
         (self.run_dir / "REPORT.md").write_text(
-            f"Overall: {overall}\nG1 ok\n| check | s | e |\n|---|---|---|\n"
+            f"Overall: {overall}\n| id | v | t | c |\n|---|---|---|---|\n| G1 | 2 | >=1 | {g1} |\n"
+            f"| check | s | e |\n|---|---|---|\n"
             f"| resolution_convergence | {conv} | {'x' if conv == 'PASS' else ''} |\n"
-            "| independent_validation | PASS | x |\n| readback | PASS | x |\n", encoding="utf-8")
+            f"| independent_validation | PASS | x |\n| readback | {rb} | x |\n", encoding="utf-8")
 
     def test_template_rejected(self):
         self.ready()
@@ -214,6 +215,161 @@ class Report(Base):
         self.report("PARTIAL", "NOT_DONE")
         self.assertEqual(run("report", self.run_dir).returncode, 0)
         self.assertTrue((self.run_dir / "provenance.json").exists())
+
+    def test_failed_criterion_blocks_pass(self):
+        self.ready()
+        self.report("PASS", g1="FAIL")
+        r = run("report", self.run_dir)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("判据 ['G1']", r.stdout)
+
+    def test_criterion_id_must_be_its_own_row(self):
+        self.gate["criteria"][0]["id"] = "1"          # 旧版只做子串匹配，"1" 几乎总能匹配上
+        self.ready()
+        (self.run_dir / "REPORT.md").write_text(
+            "Overall: PARTIAL\n| check | s | e |\n|---|---|---|\n| resolution_convergence | NOT_DONE | |\n"
+            "| independent_validation | PASS | x1 |\n| readback | PASS | x1 |\n", encoding="utf-8")
+        self.assertIn("判据 1 要正好一行", run("report", self.run_dir).stdout)
+
+    def test_na_not_allowed_for_readback(self):
+        self.ready()
+        self.report("PARTIAL", rb="NA")
+        self.assertIn("readback 不能写 NA", run("report", self.run_dir).stdout)
+
+    def test_nan_result_blocks_pass(self):
+        self.manifest["outputs"] = ["result.json"]
+        self.ready()
+        (self.run_dir / "result.json").write_text('{"T": NaN}', encoding="utf-8")
+        self.report("PASS")
+        r = run("report", self.run_dir)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NaN", r.stdout)
+
+    def test_result_expectations(self):
+        self.manifest["outputs"] = ["result.json"]
+        self.manifest["result_expect"] = [
+            {"op": "sum_approx", "keys": ["result:R", "result:T", "result:A"], "value": 1, "rel": 1e-3},
+            {"op": "converged", "keys": ["result:coarse", "result:fine"], "rel": 0.01}]
+        self.ready()
+        self.report("PASS")
+        good = {"R": 0.1, "T": 0.85, "A": 0.05, "coarse": 1.0, "fine": 1.001}
+        (self.run_dir / "result.json").write_text(json.dumps(good), encoding="utf-8")
+        self.assertEqual(run("report", self.run_dir).returncode, 0)
+        (self.run_dir / "result.json").write_text(json.dumps(dict(good, A=0.2)), encoding="utf-8")
+        self.assertIn("守恒没闭合", run("report", self.run_dir).stdout)
+        (self.run_dir / "result.json").write_text(json.dumps(dict(good, fine=1.0)), encoding="utf-8")
+        self.assertIn("不可能失败", run("report", self.run_dir).stdout)
+
+    def test_refreeze_after_submit_refused(self):
+        self.ready()
+        m = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))
+        m["jobs"] = ["1108-120000-demo-abc"]
+        m["job_gates"] = {"1108-120000-demo-abc": "0" * 64}
+        (self.run_dir / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        (self.run_dir / "gate.lock.json").unlink()
+        self.assertIn("冻结记录不见了", run("freeze", self.run_dir).stdout)
+        # 就算绕过 freeze 重建了锁，报告也会发现提交时的判据对不上
+        (self.run_dir / "gate.lock.json").write_text(json.dumps(
+            {"sha256": __import__("hashlib").sha256((self.run_dir / "gate.json").read_bytes()).hexdigest(),
+             "history": []}), encoding="utf-8")
+        self.report("PASS")
+        self.assertIn("冻结记录可能被删掉重建过", run("report", self.run_dir).stdout)
+
+
+class General(Base):
+    """通用检查：不依赖物理场名字，也能抓住同一类错误。"""
+
+    def mph(self, xml, name="g.mph"):
+        with zipfile.ZipFile(self.run_dir / name, "w") as z:
+            z.writestr("dmodel.xml", f"<Model>{xml}</Model>")
+        return self.run_dir / name
+
+    def test_partial_tensor_caught_without_tags(self):
+        f = self.mph("<Physics tag='ht' op='HeatTransfer'><PhysicsFeature tag='solid1'>"
+                     "<param param='k' value=\"1|9,'kx','0','0','0','1','0','0','0','1'\"/></PhysicsFeature></Physics>")
+        r = run("readback", f)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("physics/ht/solid1/k", r.stdout)
+
+    def test_material_tensor_format(self):
+        bad = "9|1,'sig'|1,'0'|1,'0'|1,'0'|1,'1'|1,'0'|1,'0'|1,'0'|1,'1'"
+        good = "9|1,'sig'|1,'0'|1,'0'|1,'0'|1,'sig'|1,'0'|1,'0'|1,'0'|1,'sig'"
+        mat = "<Material tag='mat1'><MaterialModel tag='def'><param param='electricconductivity' value=\"{}\"/>" \
+              "</MaterialModel></Material>"
+        self.assertEqual(run("readback", self.mph(mat.format(bad))).returncode, 1)
+        self.assertEqual(run("readback", self.mph(mat.format(good))).returncode, 0)
+
+    def test_sources_and_expect(self):
+        self.mph("<expressions name='lambda0' expr='1550[nm]'/>", "model.mph")
+        (self.run_dir / "rb.json").write_text(json.dumps({"mesh": {"dx": 2e-8}}), encoding="utf-8")
+        self.manifest["readback"] = {"sources": {"model": "model.mph", "rb": "rb.json"}, "expect": [
+            {"select": "model:param/lambda0", "op": "approx", "value": 1550, "rel": 1e-9},
+            {"select": "rb:mesh.dx", "op": "range", "max": 5e-8}]}
+        self.ready()
+        self.assertEqual(self.preflight().returncode, 0)
+        self.manifest["readback"]["expect"][0]["value"] = 1310
+        self.write()
+        self.assertEqual(run("freeze", self.run_dir, "--amend", "test").returncode, 0)
+        self.assertIn("model:param/lambda0", self.preflight().stdout)
+
+    def test_select_matching_nothing_fails(self):
+        self.manifest["readback"] = {"sources": {"m": "m.mph"},
+                                     "expect": [{"select": "m:param/typo", "op": "present"}]}
+        self.ready()
+        self.assertIn("没有匹配到任何值", self.preflight().stdout)
+
+    def test_response_test_is_computed(self):
+        (self.run_dir / "on.json").write_text('{"heat": 5.0}', encoding="utf-8")
+        (self.run_dir / "off.json").write_text('{"heat": 5.0}', encoding="utf-8")
+        self.manifest["response_tests"] = [{"id": "R1", "knob": "joule=off", "expect": "decreases",
+                                            "baseline": {"file": "on.json", "key": "heat"},
+                                            "perturbed": {"file": "off.json", "key": "heat"}, "status": "PASS"}]
+        self.ready()
+        r = self.preflight()
+        self.assertEqual(r.returncode, 1)            # 自己写的 status 不算数，按数字判
+        self.assertIn("R1", r.stdout)
+        (self.run_dir / "off.json").write_text('{"heat": 0.01}', encoding="utf-8")
+        self.assertEqual(self.preflight().returncode, 0)
+
+    def test_run_dir_driver_scanned_without_listing(self):
+        (self.run_dir / "Driver.java").write_text('m.feature("f").setIndex(\n    "c", "k", 0);\n', encoding="utf-8")
+        self.ready()
+        self.assertIn("comsol-partial-tensor", self.preflight().stdout)
+
+    def test_python_set_index_single_quotes(self):
+        f = self.dir / "drv.py"
+        f.write_text("feat.setIndex('c', 'k', 0)\n", encoding="utf-8")
+        self.assertEqual(run("scan", f).returncode, 1)
+
+    def test_marker_in_parent_dir(self):
+        old = self.dir / "old"
+        (old / "drivers").mkdir(parents=True)
+        (old / "drivers" / "D.java").write_text("// x\n", encoding="utf-8")
+        (old / "DO_NOT_REUSE.md").write_text("bad\n", encoding="utf-8")
+        self.manifest["derived_from"] = [str(old / "drivers" / "D.java")]
+        self.ready()
+        self.assertIn("不可复用", self.preflight().stdout)
+
+    def test_taint_finds_descendants(self):
+        self.ready()
+        bad = self.dir / "bad_run"
+        bad.mkdir()
+        child = self.dir / "child"
+        grandchild = self.dir / "grandchild"
+        for d, src in ((child, bad), (grandchild, child)):
+            d.mkdir()
+            (d / "manifest.json").write_text(json.dumps({"derived_from": [str(src)]}), encoding="utf-8")
+        r = run("taint", bad, "--reason", "tensor bug", "--root", self.dir)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("child", r.stdout)
+        self.assertIn("grandchild", r.stdout)
+        self.assertTrue((bad / "DO_NOT_REUSE.md").exists())
+
+    def test_job_id_parsing_ignores_warnings(self):
+        sys.path.insert(0, str(SG.parent))
+        import sg
+        self.assertEqual(sg.parse_job_id("1108-120000-demo-abc\n警告：调度器没能启动\n"), "1108-120000-demo-abc")
+        self.assertIsNone(sg.parse_job_id("警告：调度器没能启动\n"))
 
 
 class SimqGate(Base):
@@ -265,6 +421,23 @@ class SimqGate(Base):
         job = json.loads((self.home / "jobs" / r.stdout.strip() / "job.json").read_text(encoding="utf-8"))
         self.assertIn("script_sha256", job["preflight"])
 
+    def test_receipt_covers_drivers_and_model(self):
+        drv = self.run_dir / "Driver.java"
+        drv.write_text("// ok\n", encoding="utf-8")
+        self.ready()
+        self.assertEqual(self.preflight().returncode, 0)
+        drv.write_text("// changed after preflight\n", encoding="utf-8")
+        self.assertIn("Driver.java", self.simq("--script", str(self.script)).stderr)
+        self.assertEqual(self.preflight().returncode, 0)
+        make_mph(self.run_dir / "m.mph", BAD_C.replace("'1'", "'k'"))    # 读回过的模型被换掉
+        self.assertIn("m.mph", self.simq("--script", str(self.script)).stderr)
+
+    def test_relative_script_resolves_against_cwd(self):
+        self.ready()
+        self.assertEqual(self.preflight().returncode, 0)
+        r = self.simq("--script", "run.ps1")       # 进程当前目录不是 run 目录
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 class Recovery(unittest.TestCase):
     """不启动调度器，也不调用求解器，直接验证丢失后的处理。"""
@@ -308,6 +481,16 @@ class Recovery(unittest.TestCase):
 
     def test_no_resume_script_stays_lost(self):
         self.assertEqual(self.lost({})["status"], "lost")
+
+    def test_alive_runner_is_not_lost(self):
+        """心跳停了但运行器还活着（例如电脑睡眠后醒来）：不能判为丢失。"""
+        code = self.code.replace(
+            "simq.write_json(d/'runner.json',{'runner_pid':999999,'child_pid':999998,'started':started.isoformat()})",
+            "simq.write_json(d/'runner.json',{'runner_pid':os.getpid(),'child_pid':os.getpid(),"
+            "'started':simq.now_iso()})")
+        self.assertNotEqual(code, self.code)
+        self.code = code
+        self.assertEqual(self.lost({})["status"], "running")
 
 
 class Autostart(unittest.TestCase):

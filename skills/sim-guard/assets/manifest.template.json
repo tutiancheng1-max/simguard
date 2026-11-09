@@ -6,9 +6,13 @@
   "drivers": [],
   "outputs": [],
   "readback": {
-    "not_applicable": "TODO 改成 comsol_tensor_models，或 dump 加 checks；COMSOL、Lumerical、Fluent 不能跳过，纯脚本求解才可保留并写原因"
+    "sources": {"model": "TODO 保存后的模型（.mph）或求解器导出的 JSON"},
+    "expect": [
+      {"select": "model:TODO 键，先用 sg.py readback <文件> --list 查看", "op": "TODO equals | approx | range | isotropic | ..."}
+    ]
   },
-  "switch_tests": [],
+  "response_tests": [],
+  "result_expect": [],
   "literature": [],
   "resources": {
     "cores": 0,

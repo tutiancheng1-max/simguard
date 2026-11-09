@@ -6,14 +6,16 @@
   "forbidden_patterns": [
     {
       "id": "example-rule",
-      "glob": "*.java",
+      "glob": ["*.java", "*.py"],
       "regex": "oldHelperWithKnownBug\\(",
       "why": "说明为什么不能这样写，以及应该怎么写"
     }
   ],
-  "comsol_tensor": {
-    "physics_tags": ["tte", "ttl"],
-    "fields": ["T", "Te", "Tl"]
-  },
+  "readback_expect": [
+    {"select": "*:physics/*/*/c", "op": "isotropic", "physics_op": ["CoefficientFormPDE"],
+     "why": "本项目的扩散方程都是各向同性的"},
+    {"select": "*:material/*/*/thermalconductivity", "op": "nonzero"}
+  ],
+  "builtin_readback": true,
   "required_report_checks": ["energy_balance"]
 }
