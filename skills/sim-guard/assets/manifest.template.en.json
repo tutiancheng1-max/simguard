@@ -1,0 +1,27 @@
+{
+  "run_id": "TODO",
+  "line": "TODO",
+  "solver": "TODO comsol | lumerical | fluent | matlab | python | other",
+  "derived_from": [],
+  "drivers": [],
+  "outputs": [],
+  "readback": {
+    "sources": {"model": "TODO saved model (.mph) or solver-exported JSON"},
+    "expect": [
+      {"select": "model:TODO key; list keys first with sg.py readback <file> --list", "op": "TODO equals | approx | range | isotropic | ..."}
+    ]
+  },
+  "response_tests": [],
+  "result_expect": [],
+  "literature": [],
+  "resources": {
+    "cores": 0,
+    "mem_gb": 0,
+    "basis": "TODO how peak memory was estimated"
+  },
+  "resume": {
+    "supported": false,
+    "why_not": "TODO why it cannot resume; if it can, set supported=true and write how"
+  },
+  "jobs": []
+}

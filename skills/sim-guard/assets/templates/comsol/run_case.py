@@ -25,7 +25,7 @@ def comsol_bin():
         return pathlib.Path(configured)
     found = sorted(glob.glob(r"C:\Program Files\COMSOL\COMSOL*\Multiphysics\bin\win64"))
     if not found:
-        sys.exit("找不到 COMSOL：请设置环境变量 COMSOL_BIN")
+        sys.exit("找不到 COMSOL：请设置环境变量 COMSOL_BIN / COMSOL not found: set COMSOL_BIN")
     return pathlib.Path(found[-1])
 
 
@@ -42,7 +42,7 @@ def compile_java(bin_dir, stage):
         code = subprocess.call([str(bin_dir / "comsolcompile.exe"), "-classpathadd", str(HERE),
                                 str(HERE / f"{name}.java")])
         if code or not (HERE / f"{name}.class").exists():
-            sys.exit(f"{name} 编译失败，退出码 {code}")
+            sys.exit(f"{name} 编译失败，退出码 {code} / {name} compile failed, exit code {code}")
 
 
 def main(stage):
@@ -72,12 +72,12 @@ def main(stage):
         try:
             result = json.loads(match[1])
         except json.JSONDecodeError as e:
-            sys.exit(f"SG_RESULT 不是合法 JSON（{e}）：{match[1][:200]}")
+            sys.exit(f"SG_RESULT 不是合法 JSON（{e}）/ SG_RESULT is not valid JSON ({e}): {match[1][:200]}")
         (HERE / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if code:
-        sys.exit(f"comsolbatch 退出码 {code}")
+        sys.exit(f"comsolbatch 退出码 {code} / comsolbatch exit code {code}")
     if ERROR_MARK in text:
-        sys.exit(f"COMSOL 日志里有错误，见 {log}")
+        sys.exit(f"COMSOL 日志里有错误，见 {log} / errors in COMSOL log, see {log}")
     missing = [rel for rel in EXPECTED[stage] if not (HERE / rel).exists()]
     if missing:
-        sys.exit(f"阶段 {stage} 缺少产物：{missing}")
+        sys.exit(f"阶段 {stage} 缺少产物 / stage {stage} missing outputs: {missing}")

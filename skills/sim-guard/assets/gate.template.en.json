@@ -1,0 +1,12 @@
+{
+  "question": "TODO the one question this run must answer",
+  "criteria": [
+    {"id": "G1", "metric": "TODO metric name", "op": ">=", "threshold": 0, "unit": "TODO"}
+  ],
+  "validation": {
+    "kind": "TODO analytic_limit | conservation | independent_method | literature_reproduction | experiment",
+    "description": "TODO how it is validated and against what reference",
+    "shares_code_with_model": true
+  },
+  "on_fail": "TODO what to do if it fails"
+}

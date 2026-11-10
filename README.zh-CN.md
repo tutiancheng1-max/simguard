@@ -66,6 +66,8 @@ Copy-Item -Recurse skills\sim-guard $HOME\.claude\skills\sim-guard
 
 设置环境变量 `SIMQ_PY` 为 `simq.py` 的绝对路径；或者在项目根目录放一个 `simguard.project.json`，写上 `simq_py`。
 
+**输出语言。** `sg.py`、`sweep.py` 和 `simq.py` 的提示默认跟随系统语言（中文或英文）。可以用环境变量 `SIMGUARD_LANG=zh`、`en` 或 `both`（每条提示中英都显示）强制指定。
+
 **4. 配置项目规则（可选）**
 
 参考 [simguard.project.example.json](skills/sim-guard/assets/simguard.project.example.json)：
