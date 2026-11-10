@@ -27,7 +27,7 @@ def lumerical_root():
         return pathlib.Path(configured)
     found = sorted(glob.glob(r"C:\Program Files\ANSYS Inc\v*\Lumerical"))
     if not found:
-        sys.exit("找不到 Lumerical：请设置环境变量 LUMERICAL_ROOT")
+        sys.exit("找不到 Lumerical：请设置环境变量 LUMERICAL_ROOT / Lumerical not found: set LUMERICAL_ROOT")
     return pathlib.Path(found[-1])
 
 
@@ -39,7 +39,7 @@ def open_fdtd():
     except ImportError:
         bundled = sorted(root.glob("python-*/python.exe"))
         if not bundled or pathlib.Path(sys.executable) == bundled[-1]:
-            sys.exit("找不到带 numpy 的 Python")
+            sys.exit("找不到带 numpy 的 Python / no Python with numpy found")
         sys.exit(subprocess.call([str(bundled[-1]), "-u", sys.argv[0]]))
     sys.path.insert(0, str(root / "api" / "python"))
     import lumapi

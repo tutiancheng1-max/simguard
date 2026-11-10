@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """运行：python -m unittest discover -s tests"""
-import json
 import os
+
+os.environ["SIMGUARD_LANG"] = "zh"   # 先于导入 sg 设置；子进程继承，现有中文断言保持成立
+
+import json
 import pathlib
 import subprocess
 import sys
@@ -501,6 +504,50 @@ class Autostart(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("/SC ONLOGON", r.stdout)
         self.assertIn("_dispatch", r.stdout)
+
+
+class Language(unittest.TestCase):
+    """SIMGUARD_LANG 切换输出语言；失败分类同时认中英文日志。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = pathlib.Path(self.tmp.name)
+
+    def sg(self, lang, *args):
+        return run(*args, env=dict(os.environ, SIMGUARD_LANG=lang))
+
+    def test_english_error_and_template(self):
+        r = self.sg("en", "readback", self.dir / "missing.mph")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("error: ", r.stderr)
+        self.assertIn("cannot read model settings", r.stderr)
+        self.assertNotIn("读不出", r.stderr)
+        run_dir = self.dir / "run_en"
+        r = self.sg("en", "init", run_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("created: REPORT.md", r.stdout)
+        report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("## Criteria results", report)
+        self.assertIn("TODO the one question", (run_dir / "gate.json").read_text(encoding="utf-8"))
+
+    def test_both_languages(self):
+        r = self.sg("both", "readback", self.dir / "missing.mph")
+        self.assertIn("读不出模型设置", r.stderr)
+        self.assertIn("cannot read model settings", r.stderr)
+        run_dir = self.dir / "run_both"
+        r = self.sg("both", "init", run_dir)
+        self.assertIn("已生成：REPORT.md / created: REPORT.md", r.stdout)
+        self.assertIn("## 判据结果", (run_dir / "REPORT.md").read_text(encoding="utf-8"))
+
+    def test_classify_failure_english(self):
+        sys.path.insert(0, str(SG.parent))
+        import sg
+        self.assertEqual(sg.classify_failure("exceeded declared memory")[0], "memory")
+        self.assertEqual(sg.classify_failure("COMSOL license pool full (2)")[0], "license")
+        self.assertEqual(sg.classify_failure("超过声明内存")[0], "memory")
+        self.assertEqual(sg.classify_failure("compile failed")[0], "config")
+        self.assertEqual(sg.classify_failure("script does not exist")[0], "config")
 
 
 if __name__ == "__main__":

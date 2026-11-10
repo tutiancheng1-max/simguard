@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """参数扫描和监控的测试。只跑纯 Python 假任务（--sw other），不调用求解器，也不碰已有队列。"""
+import os
+os.environ["SIMGUARD_LANG"] = "zh"     # 现有断言匹配中文输出；子进程继承这个环境变量
+
 import csv
 import importlib.util
 import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -222,6 +224,13 @@ class Sweep(Queue):
         r = self.plan({"k": list(range(5))}, max_cases=3)
         self.assertEqual(r.returncode, 2)
         self.assertIn("max_cases", r.stderr)
+
+    def test_english_messages(self):
+        self.env["SIMGUARD_LANG"] = "en"
+        r = self.plan({"k": list(range(5))}, max_cases=3)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("error: 5 cases after expansion, over max_cases=3", r.stderr)
+        self.assertNotIn("错误", r.stderr)
 
     def test_stage_needs_outputs(self):
         del self.spec["stages"][1]["outputs"]

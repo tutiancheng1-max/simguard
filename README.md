@@ -13,9 +13,9 @@ An agent driving COMSOL set a thermal conductivity tensor as `diag(k, 1, 1)`: it
 
 simguard reads the saved model back before the job is submitted and stops it:
 
-![sg.py readback blocking a partially set tensor](docs/readback-demo.svg)
+![sg.py readback blocking a partially set tensor](docs/readback-demo.en.svg)
 
-*The message reads: "part of the tensor diagonal is the default 1 and part is not: usually only one component was set." Exit code 1, so `submit` refuses the run.*
+*Exit code 1, so `submit` refuses the run.*
 
 `simguard` has two parts:
 
@@ -63,6 +63,8 @@ Copy-Item -Recurse skills\sim-guard $HOME\.claude\skills\sim-guard
 **3. Tell the skill where the queue is**
 
 Set the environment variable `SIMQ_PY` to the absolute path of `simq.py`, or put a `simguard.project.json` with `simq_py` in the project root.
+
+**Output language.** Messages from `sg.py`, `sweep.py` and `simq.py` follow your OS language (Chinese or English). Override with the environment variable `SIMGUARD_LANG=en`, `zh`, or `both` (both languages on each line).
 
 **4. Configure project rules (optional)**
 
